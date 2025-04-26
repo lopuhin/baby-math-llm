@@ -43,7 +43,7 @@ def main():
     trainer.model.load_weights(checkpoint_path)
     
     # Prepare input
-    tokens = [trainer.tokenizer.BOS_TOKEN] + trainer.tokenizer.tokenize(args.prompt)
+    tokens = [trainer.tokenizer.BOS_TOKEN] + trainer.tokenizer.tokenize(args.prompt) + [trainer.tokenizer.SEP_TOKEN]
     
     # Setup generation parameters
     sampler = make_sampler(temp=args.temperature, min_p=args.min_p)

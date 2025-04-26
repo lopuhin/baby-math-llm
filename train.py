@@ -137,59 +137,8 @@ class CheckpointManager:
 class TokenizerManager:
     def __init__(self, config: DataConfig, run_dir: Optional[Path] = None):
         self.config = config
-        self.external_tokenizer = None
-        
-        # Check if an external tokenizer path is provided
-        if config.tokenizer_path is not None:
-            self.use_external_tokenizer(config.tokenizer_path)
-            
-            # If we have a run directory, copy the tokenizer to it
-            if run_dir is not None:
-                self.copy_tokenizer_to_run_dir(config.tokenizer_path, run_dir)
-        else:
-            # Fall back to byte-level tokenization
-            self.setup_vocabulary()
+        self.setup_vocabulary()
     
-    def use_external_tokenizer(self, tokenizer_path: str):
-        """Load and use an external tokenizer from the specified path."""
-        from tokenizers import Tokenizer
-        import os
-        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
-        
-        if not os.path.exists(tokenizer_file):
-            raise ValueError(f"Tokenizer file not found at {tokenizer_file}")
-        
-        print(f"Loading external tokenizer from {tokenizer_file}")
-        self.external_tokenizer = Tokenizer.from_file(tokenizer_file)
-        
-        # Extract special token IDs
-        vocab = self.external_tokenizer.get_vocab()
-        special_tokens = self.config.tokenizer['special_tokens']
-        
-        # Map special tokens to their IDs
-        self.PAD_TOKEN = vocab.get(special_tokens['pad'])
-        self.BOS_TOKEN = vocab.get(special_tokens['bos'])
-        self.EOS_TOKEN = vocab.get(special_tokens['eos'])
-        self.VOCAB_SIZE = len(vocab)
-        
-        if self.PAD_TOKEN is None or self.BOS_TOKEN is None or self.EOS_TOKEN is None:
-            raise ValueError(f"One or more special tokens not found in the external tokenizer vocabulary")
-    
-    def copy_tokenizer_to_run_dir(self, tokenizer_path: str, run_dir: Path):
-        """Copy the tokenizer files to the run directory."""
-        import shutil
-        import os
-        
-        # Create tokenizer directory in run_dir
-        run_tokenizer_dir = run_dir / 'tokenizer'
-        os.makedirs(run_tokenizer_dir, exist_ok=True)
-        
-        # Copy tokenizer.json
-        tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
-        shutil.copy2(tokenizer_file, run_tokenizer_dir / "tokenizer.json")
-        
-        print(f"Copied tokenizer to {run_tokenizer_dir}")
-        
     def setup_vocabulary(self):
         """Set up the byte-level tokenization vocabulary."""
         normal_vocab_size = self.config.tokenizer['normal_vocab_size']
@@ -205,44 +154,35 @@ class TokenizerManager:
         self.PAD_TOKEN = self.special_token_map[special_tokens['pad']]
         self.BOS_TOKEN = self.special_token_map[special_tokens['bos']]
         self.EOS_TOKEN = self.special_token_map[special_tokens['eos']]
+        if 'sep' in special_tokens:
+            self.SEP_TOKEN = self.special_token_map[special_tokens['sep']]
         self.VOCAB_SIZE = normal_vocab_size + len(self.special_token_map)
         
     def tokenize(self, text: str) -> list:
-        if self.external_tokenizer is not None:
-            # Use external tokenizer
-            encoded = self.external_tokenizer.encode(text)
-            return encoded.ids
-        else:
-            # Use byte-level tokenization
-            return list(text.encode('utf-8'))
+        return list(text.encode('utf-8'))
             
     def detokenize(self, tokens: list) -> str:
-        if self.external_tokenizer is not None:
-            # Use external tokenizer
-            return self.external_tokenizer.decode(tokens.tolist())
-        else:
-            # Use byte-level detokenization
-            return bytes(tokens).decode('utf-8', errors='ignore')
+        return bytes(tokens).decode('utf-8', errors='ignore')
             
-    def tokenize_doc(self, doc: str) -> list:
+    def tokenize_doc(self, doc: str, output: str | None = None) -> list:
         """Tokenize a document, ensuring it doesn't exceed the max context size.
         
         Args:
             doc: The text to tokenize
+            output: Optional output, if present delimited with SEP token
             
         Returns:
             A list of token IDs, including BOS and EOS tokens
         """
         max_length = self.config.preprocessing['max_context_size']
-        
-        if self.external_tokenizer is not None:
-            # Use external tokenizer
-            encoded = self.external_tokenizer.encode(doc)
-            tokens = encoded.ids[:max_length]
-            return [self.BOS_TOKEN] + tokens + [self.EOS_TOKEN]
-        else:
-            # Use byte-level tokenization
-            return [self.BOS_TOKEN] + self.tokenize(doc)[:max_length] + [self.EOS_TOKEN]
+        tokenized = [self.BOS_TOKEN] + self.tokenize(doc)
+        if output is not None:
+            tokenized.append(self.SEP_TOKEN)
+            tokenized.extend(self.tokenize(output))
+        tokenized.append(self.EOS_TOKEN)
+        assert len(tokenized) < max_length
+        return tokenized
+
 
 class DataManager:
     def __init__(self, config: DataConfig, tokenizer: TokenizerManager, batch_size: int = 1):
@@ -260,7 +200,7 @@ class DataManager:
         self._load_file(self.config.input_file, self.train_docs)
         
         # Set up training batches
-        self.train_idx = sorted(range(len(self.train_docs)), key=lambda idx: len(self.train_docs[idx]))
+        self.train_idx = list(range(len(self.train_docs)))
         random.shuffle(self.train_idx)
         self.train_batch_idx = [
             self.train_idx[i : i + self.batch_size : 1]
@@ -273,7 +213,7 @@ class DataManager:
             self._load_file(self.config.validation_file, self.val_docs)
             
             # Set up validation batches
-            self.val_idx = sorted(range(len(self.val_docs)), key=lambda idx: len(self.val_docs[idx]))
+            self.val_idx = list(range(len(self.val_docs)))
             self.val_batch_idx = [
                 self.val_idx[i : i + self.batch_size : 1]
                 for i in range(0, len(self.val_idx) - self.batch_size + 1, self.batch_size)
@@ -285,23 +225,14 @@ class DataManager:
         """Helper method to load documents from a file."""
         with open(file_path, 'r') as f:
             for line in f:
-                d = json.loads(line)
-                text = d["text"]
-                chunk_size = self.config.preprocessing['max_context_size']
-                overlap = self.config.preprocessing.get('chunk_overlap', 0)
-                
-                # Handle overlapping chunks if specified
-                stride = chunk_size - overlap
-                for i in range(0, len(text), stride):
-                    chunk_text = text[i : i + chunk_size]
-                    docs_list.append(chunk_text)
+                docs_list.append(json.loads(line))
     
-    def generate_batch(self, step: int) -> mx.array:
+    def generate_batch(self, step: int) -> tuple[mx.array, mx.array]:
         """Generate a training batch."""
         indices = self.train_batch_idx[self.train_indices[step % len(self.train_indices)]]
         return self._create_batch([self.train_docs[i] for i in indices])
     
-    def generate_validation_batch(self, batch_idx: int) -> mx.array:
+    def generate_validation_batch(self, batch_idx: int) -> tuple[mx.array, mx.array]:
         """Generate a validation batch."""
         if not self.config.validation_file or batch_idx >= len(self.val_batch_idx):
             raise ValueError("No validation data available or batch index out of range")
@@ -310,16 +241,32 @@ class DataManager:
         self.val_ptr += 1
         return self._create_batch([self.val_docs[i] for i in indices])
     
-    def _create_batch(self, docs: list) -> mx.array:
+    def _create_batch(self, docs: list) -> tuple[mx.array, mx.array]:
         """Helper method to create and pad a batch from documents."""
-        batch = [self.tokenizer.tokenize_doc(doc) for doc in docs]
+        input_lengths = None
+        if 'input' in docs[0]:
+            batch = [self.tokenizer.tokenize_doc(doc['input'], doc['output']) for doc in docs]
+            input_lengths = [x.index(self.tokenizer.SEP_TOKEN) for x in batch]
+        else:
+            assert 'text' in docs[0]
+            batch = [self.tokenizer.tokenize_doc(doc['text']) for doc in docs]
         max_len = max(len(x) for x in batch)
         
         # Pad sequences
         for i in range(len(batch)):
             batch[i] += [self.tokenizer.PAD_TOKEN] * (max_len - len(batch[i]))
             
-        return mx.array(batch)
+        batch_array = mx.array(batch)
+        inputs = batch_array[:, :-1]
+        if input_lengths:
+            # pad parts of targets corresponding to inputs, so that we don't compute loss on them
+            # TODO do it in a nice way in mlx, how do we clone?
+            targets = mx.array(batch)[:, 1:]
+            for i, idx in enumerate(input_lengths):
+                targets[i, :idx] = self.tokenizer.PAD_TOKEN
+        else:
+            targets = batch_array[:, 1:]
+        return inputs, targets
     
     @property
     def has_validation_data(self) -> bool:
@@ -554,10 +501,10 @@ class Trainer:
         num_batches = min(self.data_manager.num_validation_batches, 50)  # Cap at 50 batches to avoid too long validation
         
         for batch_idx in range(num_batches):
-            batch = self.data_manager.generate_validation_batch(batch_idx)
+            inputs, targets = self.data_manager.generate_validation_batch(batch_idx)
             
             # Forward pass only
-            loss, tokens = self.compute_loss(self.model, batch[:, :-1], batch[:, 1:])
+            loss, tokens = self.compute_loss(self.model, inputs, targets)
             
             # Accumulate metrics
             total_loss += float(loss)
@@ -742,11 +689,11 @@ class Trainer:
                 if step >= self.total_steps:
                     break
                 # Generate batch
-                batch = self.data_manager.generate_batch(step)
+                inputs, targets = self.data_manager.generate_batch(step)
                 
                 # Forward and backward pass
                 (loss, tokens), grad = loss_value_and_grad(
-                    self.model, batch[:, :-1], batch[:, 1:]
+                    self.model, inputs, targets
                 )
                 
                 # Gradient clipping if configured
