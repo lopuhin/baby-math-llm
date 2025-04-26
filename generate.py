@@ -1,11 +1,15 @@
 import argparse
-from pathlib import Path
-import mlx.core as mx
-from train import Trainer
-from mlx_lm.sample_utils import make_sampler, make_logits_processors
-import mlx.nn as nn
 import time
+from pathlib import Path
+
+import mlx.core as mx
+import mlx.nn as nn
+from mlx_lm.sample_utils import make_sampler, make_logits_processors
+
 from generate_lite import generate_lite, beam_search
+from train import Trainer
+
+
 mx.set_default_device(mx.gpu)
 def main():
     parser = argparse.ArgumentParser(description='Generate text using a trained model')
@@ -15,14 +19,6 @@ def main():
                        help='Text prompt to start generation')
     parser.add_argument('--max-tokens', type=int, default=256,
                        help='Maximum number of tokens to generate')
-    parser.add_argument('--temperature', type=float, default=1.0,
-                       help='Sampling temperature')
-    parser.add_argument('--min-p', type=float, default=0.05,
-                       help='Minimum probability for nucleus sampling')
-    parser.add_argument('--repetition-penalty', type=float, default=1.1,
-                       help='Repetition penalty factor')
-    parser.add_argument('--repetition-context-size', type=int, default=20,
-                       help='Context size for repetition penalty')
     args = parser.parse_args()
 
     # Load run configuration and initialize trainer
@@ -53,29 +49,15 @@ def main():
     )
     
     # Generate
-    """output = beam_search(
-        trainer.model,
-        mx.array(tokens),
-        max_tokens=args.max_tokens,  # Limit the max tokens to generate
-        verbose=True,
-        n_beams=4,  # Use beam search for generation
-        stop_tokens=[trainer.tokenizer.EOS_TOKEN]
-    )"""
-    mx.random.seed(int(time.time() * 1000))
     greedy_output, greedy_score = generate_lite(
             trainer.model,
             mx.array(tokens),
             max_tokens=args.max_tokens,
-            sampler=sampler,
             verbose=False,
             stop_tokens=[trainer.tokenizer.EOS_TOKEN],
-            logits_processors=logits_processors
     )
     print(f"Greedy Output: {trainer.tokenizer.detokenize(greedy_output)}")
-    #print(f"Greedy Output (Score: {greedy_score:.3f}):     {trainer.tokenizer.detokenize(greedy_output)}")
-    
-    # Print result
-    #print(f"Greedy (Score: {score:.3f}): {trainer.tokenizer.detokenize(output)}")
+
 
 if __name__ == "__main__":
     main()

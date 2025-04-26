@@ -1,8 +1,14 @@
+import importlib
+import inspect
 import json
 import random
+import os
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any
+
 import yaml
 import mlx.optimizers as optim
 import mlx_optimizers as optim_x
@@ -10,61 +16,56 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from tqdm import tqdm
-import time
-from datetime import datetime
-import os
-#from mlx_lm.models.llama import Model, ModelArgs
-import importlib
 from mlx.utils import tree_flatten, tree_map, tree_unflatten
-import inspect
-
-def filter_valid_args(cls, arg_dict):
-    valid_params = inspect.signature(cls).parameters
-    return {k: v for k, v in arg_dict.items() if k in valid_params}
 
 
 @dataclass
 class DataConfig:
     input_file: str
-    preprocessing: Dict[str, int]
-    tokenizer: Dict[str, Any]
-    tokenizer_path: Optional[str] = None  # Path to a directory containing a tokenizer.json file
-    validation_file: Optional[str] = None
-    weight_path: Optional[str] = None
+    preprocessing: dict[str, int]
+    tokenizer: dict[str, Any]
+    validation_file: str | None = None
+    weight_path: str | None = None
+
 
 @dataclass
 class ModelConfig:
     architecture: str
-    dimensions: Dict[str, int]
-    attention: Dict[str, Any]
-    normalization: Dict[str, float]
-    rope: Dict[str, Any]
-    misc: Dict[str, bool]
+    dimensions: dict[str, int]
+    attention: dict[str, Any]
+    normalization: dict[str, float]
+    rope: dict[str, Any]
+    misc: dict[str, bool]
+
 
 @dataclass
 class TrainingConfig:
-    hyperparameters: Dict[str, Any]
-    scheduler: Dict[str, Any]
-    optimization: Dict[str, Any]
-    epochs: Optional[int] = None
+    hyperparameters: dict[str, Any]
+    scheduler: dict[str, Any]
+    optimization: dict[str, Any]
+    epochs: int | None = None
+
 
 @dataclass
 class LoggingConfig:
     log_dir: str
     checkpoint_dir: str
-    steps: Dict[str, int]
-    metrics: Dict[str, bool]
+    steps: dict[str, int]
+    metrics: dict[str, bool]
     # Default to 0 (no validation) if not specified
+
 
 @dataclass
 class SystemConfig:
     seed: int
     device: str
 
+
 @dataclass
 class ResumeConfig:
     checkpoint: str  # Path to checkpoint base name
     reset_optimizer: bool = False  # Optional flag to reset optimizer state
+
 
 @dataclass
 class Config:
@@ -74,7 +75,7 @@ class Config:
     training: TrainingConfig
     logging: LoggingConfig
     system: SystemConfig
-    resume: Optional[ResumeConfig] = None
+    resume: ResumeConfig | None = None
     overwrite: bool = False
 
     @classmethod
@@ -106,6 +107,7 @@ class Config:
             resume=resume_config
         )
 
+
 class CheckpointManager:
     @staticmethod
     def validate_unique_name(name: str) -> None:
@@ -134,8 +136,9 @@ class CheckpointManager:
         state_path = f"{checkpoint_path}_state.json"
         return model_path, optimizer_path, state_path
 
+
 class TokenizerManager:
-    def __init__(self, config: DataConfig, run_dir: Optional[Path] = None):
+    def __init__(self, config: DataConfig, run_dir: Path | None = None):
         self.config = config
         self.setup_vocabulary()
     
@@ -278,6 +281,7 @@ class DataManager:
         """Get the number of validation batches."""
         return len(self.val_batch_idx) if self.has_validation_data else 0
 
+
 class OptimizationManager:
     def __init__(self, config: TrainingConfig, num_training_steps: int):
         self.config = config
@@ -319,6 +323,7 @@ class OptimizationManager:
             return optim.SGD(**kwargs)
         else:
             raise ValueError(f"Unsupported optimizer: {cfg['optimizer']}")
+
 
 class Trainer:
     def __init__(self, config_path: str, for_training=True):
@@ -452,17 +457,10 @@ class Trainer:
         }
         
         # Add tokenizer information to metadata
-        if self.config.data.tokenizer_path:
-            metadata['tokenizer'] = {
-                'type': 'external',
-                'path': self.config.data.tokenizer_path,
-                'vocab_size': self.tokenizer.VOCAB_SIZE
-            }
-        else:
-            metadata['tokenizer'] = {
-                'type': 'byte-level',
-                'vocab_size': self.tokenizer.VOCAB_SIZE
-            }
+        metadata['tokenizer'] = {
+            'type': 'byte-level',
+            'vocab_size': self.tokenizer.VOCAB_SIZE
+        }
         
         with open(self.run_dir / 'metadata.json', 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -472,7 +470,7 @@ class Trainer:
             with open(self.config_path, 'r') as config_file:
                 f.write(config_file.read())
     
-    def compute_loss(self, model, inputs: mx.array, targets: mx.array) -> Tuple[mx.array, int]:
+    def compute_loss(self, model, inputs: mx.array, targets: mx.array) -> tuple[mx.array, int]:
         logits = model(inputs)
         logits = logits.astype(mx.float32)
         loss = nn.losses.cross_entropy(logits, targets)
@@ -774,6 +772,12 @@ class Trainer:
             if final_val_loss is not None:
                 log_file.write(f"Final validation loss: {final_val_loss:.4e} (ppl={np.exp(final_val_loss):.2f})\n")
             log_file.write(f"Total tokens processed: {total_tokens/1000:.2f}K\n")
+
+
+def filter_valid_args(cls, arg_dict):
+    valid_params = inspect.signature(cls).parameters
+    return {k: v for k, v in arg_dict.items() if k in valid_params}
+
 
 def main():
     import argparse
