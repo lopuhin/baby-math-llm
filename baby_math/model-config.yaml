@@ -1,4 +1,4 @@
-name: "Baby-Math-S-ep3"
+name: "Baby-Math-v2-S-ep4"
 overwrite: true
 data:
   input_file: "baby_math/train.jsonl"
@@ -41,7 +41,7 @@ model:
 
 training:
   # Number of epochs to train for (optional)
-  epochs: 3
+  epochs: 4
   hyperparameters:
     batch_size: 16
     learning_rate: 2.0e-2
