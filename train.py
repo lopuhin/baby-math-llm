@@ -359,7 +359,7 @@ class Trainer:
             
             # Initialize validation metrics tracking
             self.validation_steps = self.config.logging.steps.get('validation_interval', 0)
-            self.validation_losses = []
+            self.validation_metrics = []
     
     def setup_system(self):
         # Set random seeds
@@ -472,7 +472,7 @@ class Trainer:
             with open(self.config_path, 'r') as config_file:
                 f.write(config_file.read())
     
-    def compute_loss(self, model, inputs: mx.array, targets: mx.array) -> tuple[mx.array, int]:
+    def compute_loss(self, model, inputs: mx.array, targets: mx.array) -> tuple[mx.array, int, int]:
         logits = model(inputs)
         logits = logits.astype(mx.float32)
         loss = nn.losses.cross_entropy(logits, targets)
@@ -481,14 +481,19 @@ class Trainer:
         pad_mask = (targets != self.tokenizer.PAD_TOKEN)
         loss = loss * pad_mask
         ntoks = pad_mask.sum()
+
+        # item-level accuracy, where all tokens were correct (hard metric but cheap to compute)
+        predictions = logits.argmax(axis=2)
+        correct_tokens = predictions * pad_mask == targets * pad_mask
+        nitems_correct = correct_tokens.min(axis=1).sum()
         
-        return loss.sum() / ntoks, ntoks
+        return loss.sum() / ntoks, ntoks, nitems_correct
         
-    def validate(self) -> float:
+    def validate(self) -> dict:
         """Run validation on the validation dataset.
         
         Returns:
-            float: Average validation loss
+            dict: a dictionary with metrics, including average validation loss
         """
         if not self.data_manager.has_validation_data:
             return None
@@ -496,30 +501,33 @@ class Trainer:
         # Ensure we're in evaluation mode (no need for gradients)
         total_loss = 0.0
         total_tokens = 0
+        total_items = 0
+        total_correct_items = 0
         
         # Process all validation batches
-        num_batches = min(self.data_manager.num_validation_batches, 50)  # Cap at 50 batches to avoid too long validation
-        
+        num_batches = self.data_manager.num_validation_batches
         for batch_idx in range(num_batches):
             inputs, targets = self.data_manager.generate_validation_batch(batch_idx)
             
             # Forward pass only
-            loss, tokens = self.compute_loss(self.model, inputs, targets)
+            loss, tokens, correct_items = self.compute_loss(self.model, inputs, targets)
             
             # Accumulate metrics
             total_loss += float(loss)
-            total_tokens += tokens
+            total_correct_items += correct_items
+            total_items += targets.shape[0]
             
             # Clear GPU cache if needed
             if self.config.system.device == "gpu":
                 mx.clear_cache()
         
-        # Calculate average loss
-        avg_loss = total_loss / num_batches
+        # Calculate average metrics
+        avg_loss = float(total_loss / num_batches)
+        avg_item_accuracy = float(total_correct_items / total_items)
         
-        return avg_loss
+        return dict(loss=avg_loss, item_accuracy=avg_item_accuracy)
 
-    def save_checkpoint(self, step: int | str, val_loss: float = None):
+    def save_checkpoint(self, step: int | str, val_metrics: dict | None = None):
         # Save model weights
         weights = dict(tree_flatten(self.model.parameters()))
         model_path = self.checkpoint_dir / f'step_{step}_model.safetensors'
@@ -535,7 +543,7 @@ class Trainer:
             'step': step if isinstance(step, int) else self.total_steps,
             'val_ptr': self.data_manager.val_ptr,
             'total_tokens': self.total_tokens.item(),
-            'validation_losses': self.validation_losses,
+            'validation_metrics': self.validation_metrics,
         }
         state_path = self.checkpoint_dir / f'step_{step}_state.json'
         with open(state_path, 'w') as f:
@@ -559,9 +567,8 @@ class Trainer:
             }
         }
         
-        # Include validation loss if available
-        if val_loss is not None:
-            checkpoint_info['validation_loss'] = val_loss
+        if val_metrics is not None:
+            checkpoint_info['validation_metrics'] = val_metrics
             
         metadata['checkpoints'].append(checkpoint_info)
         
@@ -569,7 +576,7 @@ class Trainer:
             json.dump(metadata, f, indent=2)
 
     def log_metrics(self, step: int, loss: float, tokens: int, 
-                   total_tokens: int, start_time: float, val_loss: float = None) -> str:
+                    total_tokens: int, item_accuracy: float, start_time: float, val_metrics: dict | None = None) -> str:
         metrics = []
         
         # Add epoch information if epochs are configured
@@ -578,6 +585,8 @@ class Trainer:
             epoch_step = step % self.steps_per_epoch + 1
             metrics.append(f"epoch={current_epoch}/{self.config.training.epochs} ({epoch_step}/{self.steps_per_epoch})")
         
+        val_loss = (val_metrics or {}).get('loss')
+        val_item_accuracy = (val_metrics or {}).get('item_accuracy')
         if self.config.logging.metrics['log_loss']:
             metrics.append(f"loss={loss:.3e}")
             
@@ -591,6 +600,10 @@ class Trainer:
             # Add validation perplexity if available
             if val_loss is not None:
                 metrics.append(f"val_ppl={np.exp(val_loss):.2f}")
+
+        metrics.append(f"item_accuracy={item_accuracy:.3f}")
+        if val_item_accuracy is not None:
+            metrics.append(f"val_item_accuracy={val_item_accuracy:.3f}")
             
         if self.config.logging.metrics['log_tokens_per_second']:
             tokens_per_sec = total_tokens / (1000 * (time.time() - start_time))
@@ -632,7 +645,7 @@ class Trainer:
         self.start_step = training_state['step'] if isinstance(training_state['step'], int) else 0
         self.data_manager.val_ptr = training_state['val_ptr']
         self.total_tokens = training_state['total_tokens']
-        self.validation_losses = training_state['validation_losses']
+        self.validation_metrics = training_state['validation_metrics']
         
         print(f"Resumed training from checkpoint {checkpoint_path} at step {self.start_step}")
         
@@ -676,13 +689,15 @@ class Trainer:
                 log_file.write(f"Remaining steps: {self.total_steps - start_step}\n")
                 log_file.write("=" * 50 + "\n\n")
             
-            # Log initial validation loss if validation data is available and not resuming
-            val_loss = None
+            # Log initial validation metrics if validation data is available and not resuming
             if self.validation_steps > 0 and self.data_manager.has_validation_data and not skip_initial_validation:
-                val_loss = self.validate()
-                log_file.write(f"Initial validation loss: {val_loss:.4e} (ppl={np.exp(val_loss):.2f})\n\n")
-                # Add to validation loss history
-                self.validation_losses.append((0, val_loss))
+                val_metrics = self.validate()
+                val_loss = val_metrics['loss']
+                val_item_accuracy = val_metrics['item_accuracy']
+                log_file.write(
+                    f"Initial validation loss: {val_loss:.4e} (ppl={np.exp(val_loss):.2f}) "
+                    f"item accuracy: {val_item_accuracy:.4f}\n\n")
+                self.validation_metrics.append((0, val_metrics))
             
             for step in progress_bar:
                 step += start_step
@@ -692,9 +707,10 @@ class Trainer:
                 inputs, targets = self.data_manager.generate_batch(step)
                 
                 # Forward and backward pass
-                (loss, tokens), grad = loss_value_and_grad(
+                (loss, tokens, correct_items), grad = loss_value_and_grad(
                     self.model, inputs, targets
                 )
+                item_accuracy = correct_items / targets.shape[0]
                 
                 # Gradient clipping if configured
                 if 'gradient_clip' in self.config.training.hyperparameters:
@@ -710,21 +726,30 @@ class Trainer:
                     mx.clear_cache()
                 
                 # Run validation
+                val_metrics = None
                 if self.validation_steps > 0 and self.data_manager.has_validation_data and (step + 1) % self.validation_steps == 0:
-                    val_loss = self.validate()
+                    val_metrics = self.validate()
                     # Add to validation loss history
-                    self.validation_losses.append((step + 1, val_loss))
+                    self.validation_metrics.append((step + 1, val_metrics))
                     
                     # Log validation separately for clear visibility
-                    val_metrics = f"val_loss={val_loss:.3e} | val_ppl={np.exp(val_loss):.2f}"
-                    log_file.write(f"Step {step + 1} validation: {val_metrics}\n")
+                    val_loss = val_metrics['loss']
+                    val_item_accuracy = val_metrics['item_accuracy']
+                    # TODO unify all metrics logging, it's all over the place
+                    val_metrics_s = (
+                        f"val_loss={val_loss:.3e} | val_ppl={np.exp(val_loss):.2f} "
+                        f"val_item_accuracy={val_item_accuracy:.3f}"
+                    )
+                    log_file.write(f"Step {step + 1} validation: {val_metrics_s}\n")
                     log_file.flush()
                 
                 # Logging
                 if step % self.config.logging.steps['logging_interval'] == 0:
-                    # Only include val_loss if it was just calculated
-                    current_val_loss = val_loss if self.validation_steps > 0 and (step + 1) % self.validation_steps == 0 else None
-                    metrics = self.log_metrics(step, loss, tokens, total_tokens, start_time, current_val_loss)
+                    # Only include val_metrics if it was just calculated
+                    current_val_metrics = val_metrics if self.validation_steps > 0 and (step + 1) % self.validation_steps == 0 else None
+                    metrics = self.log_metrics(step, loss, tokens, total_tokens, item_accuracy, start_time, current_val_metrics)
+                    if current_val_metrics:
+                        print(val_metrics_s)
                     
                     # Update progress bar
                     progress_bar.set_description(metrics)
@@ -737,30 +762,29 @@ class Trainer:
                 # Save checkpoint
                 if (1 + step) % self.config.logging.steps['checkpoint_interval'] == 0:
                     # Find the most recent validation loss if available
-                    last_val_loss = val_loss if val_loss is not None else None
+                    last_val_metrics = val_metrics if val_metrics is not None else None
                     # Update total_tokens in the trainer instance for checkpoint saving
                     self.total_tokens = total_tokens
-                    self.save_checkpoint(step + 1, last_val_loss)
+                    self.save_checkpoint(step + 1, last_val_metrics)
         
         # Final validation
-        final_val_loss = None
+        final_val_metrics = None
         if self.validation_steps > 0 and self.data_manager.has_validation_data:
-            final_val_loss = self.validate()
-            self.validation_losses.append((self.total_steps, final_val_loss))
+            final_val_metrics = self.validate()
+            self.validation_metrics.append((self.total_steps, final_val_metrics))
         
         # Save final checkpoint with validation loss
         self.total_tokens = total_tokens
-        self.save_checkpoint("final", final_val_loss)
+        self.save_checkpoint("final", final_val_metrics)
         
-        # Save validation losses to metadata
-        if self.validation_losses:
+        if self.validation_metrics:
             metadata_path = self.run_dir / 'metadata.json'
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
             
             metadata['validation'] = {
-                'steps': [step for step, _ in self.validation_losses],
-                'losses': [float(loss) for _, loss in self.validation_losses]
+                'steps': [step for step, _ in self.validation_metrics],
+                'metrics': [metrics for _, metrics in self.validation_metrics]
             }
             
             with open(metadata_path, 'w') as f:
@@ -771,8 +795,12 @@ class Trainer:
             log_file.write("\n" + "=" * 50 + "\n")
             log_file.write(f"Training completed at {datetime.now()}\n")
             log_file.write(f"Final training metrics: {metrics}\n")
-            if final_val_loss is not None:
-                log_file.write(f"Final validation loss: {final_val_loss:.4e} (ppl={np.exp(final_val_loss):.2f})\n")
+            if final_val_metrics is not None:
+                final_val_loss = final_val_metrics['loss']
+                final_val_item_accuracy = final_val_metrics['item_accuracy']
+                log_file.write(
+                    f"Final validation loss: {final_val_loss:.4e} (ppl={np.exp(final_val_loss):.2f}) "
+                    f"Final item accuracy: {final_val_item_accuracy:.4f}\n")
             log_file.write(f"Total tokens processed: {total_tokens/1000:.2f}K\n")
 
 
