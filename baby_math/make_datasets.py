@@ -51,15 +51,18 @@ def main():
     train_examples = []
     valid_examples = []
     examples = []
-    for a in range(-99, 100):
-        for b in range(-99, 100):
+    # TODO try stricter separation of training and validation data
+    #for a in range(-99, 100):
+    for a in range(100):
+        #for b in range(-99, 100):
+        for b in range(100):
             if abs(a) < 10 and abs(b) < 10:
                 lst = train_examples
             else:
                 lst = examples
             lst.extend([
                 addition_example(a, b),
-                subtraction_example(a, b),
+                # subtraction_example(a, b),
             ])
     
     keys = sorted({x['key'] for x in examples})
