@@ -327,6 +327,26 @@ class OptimizationManager:
             raise ValueError(f"Unsupported optimizer: {cfg['optimizer']}")
 
 
+@dataclass
+class ValidationMetrics:
+    loss: float
+    item_accuracy: float
+
+    @property
+    def perplexity(self):
+        return np.exp(self.loss)
+
+    def to_json(self):
+        return dict(loss=self.loss, item_accuracy=self.item_accuracy)
+
+    def to_string(self, prefix: str="val_"):
+        return " | ".join([
+            f"{prefix}loss={self.loss:.3e}",
+            f"{prefix}ppl={self.perplexity:.2f}",
+            f"{prefix}item_accuracy={self.item_accuracy:.3f}",
+        ])
+
+
 class Trainer:
     def __init__(self, config_path: str, for_training=True):
         self.config = Config.from_yaml(config_path)
@@ -489,11 +509,11 @@ class Trainer:
         
         return loss.sum() / ntoks, ntoks, nitems_correct
         
-    def validate(self) -> dict:
+    def validate(self) -> ValidationMetrics | None:
         """Run validation on the validation dataset.
         
         Returns:
-            dict: a dictionary with metrics, including average validation loss
+            ValidationMetrics: a class with metrics, including average validation loss
         """
         if not self.data_manager.has_validation_data:
             return None
@@ -521,13 +541,12 @@ class Trainer:
             if self.config.system.device == "gpu":
                 mx.clear_cache()
         
-        # Calculate average metrics
-        avg_loss = float(total_loss / num_batches)
-        avg_item_accuracy = float(total_correct_items / total_items)
-        
-        return dict(loss=avg_loss, item_accuracy=avg_item_accuracy)
+        return ValidationMetrics(
+            loss=float(total_loss / num_batches),
+            item_accuracy=float(total_correct_items / total_items),
+        )
 
-    def save_checkpoint(self, step: int | str, val_metrics: dict | None = None):
+    def save_checkpoint(self, step: int | str, val_metrics: ValidationMetrics | None = None):
         # Save model weights
         weights = dict(tree_flatten(self.model.parameters()))
         model_path = self.checkpoint_dir / f'step_{step}_model.safetensors'
@@ -568,15 +587,17 @@ class Trainer:
         }
         
         if val_metrics is not None:
-            checkpoint_info['validation_metrics'] = val_metrics
+            checkpoint_info['validation_metrics'] = val_metrics.to_json()
             
         metadata['checkpoints'].append(checkpoint_info)
         
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-    def log_metrics(self, step: int, loss: float, tokens: int, 
-                    total_tokens: int, item_accuracy: float, start_time: float, val_metrics: dict | None = None) -> str:
+    def get_metrics_s(
+            self, step: int, total_tokens: int, start_time: float,
+            train_metrics: ValidationMetrics,
+            val_metrics: ValidationMetrics | None = None) -> str:
         metrics = []
         
         # Add epoch information if epochs are configured
@@ -585,32 +606,18 @@ class Trainer:
             epoch_step = step % self.steps_per_epoch + 1
             metrics.append(f"epoch={current_epoch}/{self.config.training.epochs} ({epoch_step}/{self.steps_per_epoch})")
         
-        val_loss = (val_metrics or {}).get('loss')
-        val_item_accuracy = (val_metrics or {}).get('item_accuracy')
-        if self.config.logging.metrics['log_loss']:
-            metrics.append(f"loss={loss:.3e}")
+        if self.config.logging.metrics['log_train_metrics']:
+            metrics.append(train_metrics.to_string('train_'))
             
-            # Add validation loss if available
-            if val_loss is not None:
-                metrics.append(f"val_loss={val_loss:.3e}")
-            
-        if self.config.logging.metrics['log_perplexity']:
-            metrics.append(f"ppl={np.exp(loss):.2f}")
-            
-            # Add validation perplexity if available
-            if val_loss is not None:
-                metrics.append(f"val_ppl={np.exp(val_loss):.2f}")
-
-        metrics.append(f"item_accuracy={item_accuracy:.3f}")
-        if val_item_accuracy is not None:
-            metrics.append(f"val_item_accuracy={val_item_accuracy:.3f}")
+        if val_metrics:
+            metrics.append(val_metrics.to_string())
             
         if self.config.logging.metrics['log_tokens_per_second']:
             tokens_per_sec = total_tokens / (1000 * (time.time() - start_time))
             metrics.append(f"tok/s={tokens_per_sec:.2f}K")
         
         if self.config.logging.metrics['log_tokens_processed']:
-            metrics.append(f"toks={tokens}")
+            metrics.append(f"toks={total_tokens}")
             
         if self.config.logging.metrics['log_learning_rate']:
             metrics.append(f"lr={self.lr_schedule(step):.3e}")
@@ -671,7 +678,6 @@ class Trainer:
         start_time = time.time()
         # Create progress bar with adjusted range for resuming
         progress_bar = tqdm(range(self.total_steps), desc="Training", initial=start_step)
-
         
         # Initialize logging
         with open(self.log_file, 'a' if start_step > 0 else 'w') as log_file:
@@ -692,12 +698,8 @@ class Trainer:
             # Log initial validation metrics if validation data is available and not resuming
             if self.validation_steps > 0 and self.data_manager.has_validation_data and not skip_initial_validation:
                 val_metrics = self.validate()
-                val_loss = val_metrics['loss']
-                val_item_accuracy = val_metrics['item_accuracy']
-                log_file.write(
-                    f"Initial validation loss: {val_loss:.4e} (ppl={np.exp(val_loss):.2f}) "
-                    f"item accuracy: {val_item_accuracy:.4f}\n\n")
-                self.validation_metrics.append((0, val_metrics))
+                log_file.write(val_metrics.to_string('initial_val_'))
+                self.validation_metrics.append((0, val_metrics.to_json()))
             
             for step in progress_bar:
                 step += start_step
@@ -710,7 +712,10 @@ class Trainer:
                 (loss, tokens, correct_items), grad = loss_value_and_grad(
                     self.model, inputs, targets
                 )
-                item_accuracy = correct_items / targets.shape[0]
+                train_metrics = ValidationMetrics(
+                    loss=float(loss),
+                    item_accuracy=float(correct_items / targets.shape[0]),
+                )
                 
                 # Gradient clipping if configured
                 if 'gradient_clip' in self.config.training.hyperparameters:
@@ -723,45 +728,32 @@ class Trainer:
                 mx.eval(loss)
                 
                 if self.config.system.device == "gpu":
+                    # FIXME check if it's needed and how much does it affect performance
                     mx.clear_cache()
                 
                 # Run validation
                 val_metrics = None
                 if self.validation_steps > 0 and self.data_manager.has_validation_data and (step + 1) % self.validation_steps == 0:
                     val_metrics = self.validate()
-                    # Add to validation loss history
-                    self.validation_metrics.append((step + 1, val_metrics))
-                    
-                    # Log validation separately for clear visibility
-                    val_loss = val_metrics['loss']
-                    val_item_accuracy = val_metrics['item_accuracy']
-                    # TODO unify all metrics logging, it's all over the place
-                    val_metrics_s = (
-                        f"val_loss={val_loss:.3e} | val_ppl={np.exp(val_loss):.2f} "
-                        f"val_item_accuracy={val_item_accuracy:.3f}"
-                    )
-                    log_file.write(f"Step {step + 1} validation: {val_metrics_s}\n")
+                    self.validation_metrics.append((step + 1, val_metrics.to_json()))
+                    log_file.write(f"Step {step + 1} validation: {val_metrics.to_string()}\n")
                     log_file.flush()
                 
                 # Logging
                 if step % self.config.logging.steps['logging_interval'] == 0:
                     # Only include val_metrics if it was just calculated
-                    current_val_metrics = val_metrics if self.validation_steps > 0 and (step + 1) % self.validation_steps == 0 else None
-                    metrics = self.log_metrics(step, loss, tokens, total_tokens, item_accuracy, start_time, current_val_metrics)
-                    if current_val_metrics:
-                        print(val_metrics_s)
+                    if val_metrics:
+                        tqdm.write(val_metrics.to_string())
+                    train_metrics_s = self.get_metrics_s(
+                        step, total_tokens, start_time, train_metrics, val_metrics)
+                    progress_bar.set_description(train_metrics_s)
                     
-                    # Update progress bar
-                    progress_bar.set_description(metrics)
-                    
-                    # Write to log file
-                    log_message = f"Step {step}: {metrics}\n"
-                    log_file.write(log_message)
+                    log_file.write(f"Step {step}: {train_metrics_s}\n")
                     log_file.flush()
                 
                 # Save checkpoint
                 if (1 + step) % self.config.logging.steps['checkpoint_interval'] == 0:
-                    # Find the most recent validation loss if available
+                    # Find the most recent validation metrics if available
                     last_val_metrics = val_metrics if val_metrics is not None else None
                     # Update total_tokens in the trainer instance for checkpoint saving
                     self.total_tokens = total_tokens
@@ -771,7 +763,7 @@ class Trainer:
         final_val_metrics = None
         if self.validation_steps > 0 and self.data_manager.has_validation_data:
             final_val_metrics = self.validate()
-            self.validation_metrics.append((self.total_steps, final_val_metrics))
+            self.validation_metrics.append((self.total_steps, final_val_metrics.to_json()))
         
         # Save final checkpoint with validation loss
         self.total_tokens = total_tokens
@@ -794,13 +786,9 @@ class Trainer:
         with open(self.log_file, 'a') as log_file:
             log_file.write("\n" + "=" * 50 + "\n")
             log_file.write(f"Training completed at {datetime.now()}\n")
-            log_file.write(f"Final training metrics: {metrics}\n")
+            log_file.write(f"Final training metrics: {train_metrics_s}\n")
             if final_val_metrics is not None:
-                final_val_loss = final_val_metrics['loss']
-                final_val_item_accuracy = final_val_metrics['item_accuracy']
-                log_file.write(
-                    f"Final validation loss: {final_val_loss:.4e} (ppl={np.exp(final_val_loss):.2f}) "
-                    f"Final item accuracy: {final_val_item_accuracy:.4f}\n")
+                log_file.write(final_val_metrics.to_string('final_val_'))
             log_file.write(f"Total tokens processed: {total_tokens/1000:.2f}K\n")
 
 
