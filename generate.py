@@ -1,3 +1,5 @@
+""" Based on generate.py from https://github.com/N8python/mlx-pretrain, © N8python
+"""
 import argparse
 import time
 from pathlib import Path

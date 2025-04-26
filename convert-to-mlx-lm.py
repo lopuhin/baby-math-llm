@@ -1,3 +1,5 @@
+""" convert-to-mlx-lm.py from https://github.com/N8python/mlx-pretrain, © N8python
+"""
 import argparse
 from pathlib import Path
 import mlx.core as mx

@@ -1,3 +1,5 @@
+""" Based on train.py from https://github.com/N8python/mlx-pretrain, © N8python
+"""
 import importlib
 import inspect
 import json
