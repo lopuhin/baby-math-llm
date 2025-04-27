@@ -537,10 +537,6 @@ class Trainer:
             total_correct_items += correct_items
             total_items += targets.shape[0]
 
-            # Clear GPU cache if needed
-            if self.config.system.device == "gpu":
-                mx.clear_cache()
-
         return ValidationMetrics(
             loss=float(total_loss / num_batches),
             item_accuracy=float(total_correct_items / total_items),
@@ -726,10 +722,6 @@ class Trainer:
                 total_tokens += tokens
                 self.optimizer.update(self.model, grad)
                 mx.eval(loss)
-
-                if self.config.system.device == "gpu":
-                    # FIXME check if it's needed and how much does it affect performance
-                    mx.clear_cache()
 
                 # Run validation
                 val_metrics = None
