@@ -41,7 +41,7 @@ model:
 
 training:
   # Number of epochs to train for (optional)
-  epochs: 20
+  epochs: 40
   hyperparameters:
     batch_size: 16
     learning_rate: 2.0e-3

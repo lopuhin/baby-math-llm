@@ -52,10 +52,13 @@ def main():
     valid_examples = []
     examples = []
     # TODO try stricter separation of training and validation data
+    rng = random.Random(args.seed)
     #for a in range(-99, 100):
-    for a in range(100):
+    for a in range(1000):
         #for b in range(-99, 100):
-        for b in range(100):
+        for b in range(1000):
+            if abs(a) >= 100 and abs(b) >= 100 and rng.random() > 0.05:
+                continue
             if abs(a) < 10 and abs(b) < 10:
                 lst = train_examples
             else:
@@ -67,7 +70,7 @@ def main():
     
     keys = sorted({x['key'] for x in examples})
     random.Random(args.seed).shuffle(keys)
-    keys = keys[:3000]
+    keys = keys[:4000]
     n_train = int(math.ceil(len(keys) * 0.8))
 
     train_keys = set(keys[:n_train])
