@@ -44,7 +44,7 @@ def subtraction_example(a, b):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('output', type=Path)
+    parser.add_argument('--output', type=Path, default=Path(__file__).parent)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 

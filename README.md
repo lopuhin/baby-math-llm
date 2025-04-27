@@ -6,22 +6,22 @@ Pre-training code is taken from MLX-Pretain, see https://github.com/N8python/mlx
 
 The idea is inspired by "Teaching Arithmetic to Small Transformers", see https://arxiv.org/pdf/2307.03381
 
-Install (tested on Python 3.12):
+This needs Apple Silicon to run as it is based on MLX. Install (tested on Python 3.12, should work on 3.10+):
 
     pip install -r requirements.txt
 
 Prepare datasets:
 
-    python baby_math/make_datasets.py baby_math
+    python baby_math/make_datasets.py
 
 Train an LLM:
 
-    python train.py --config baby_math/model-config.yaml
+    python train.py --config baby_math/model-config-s.yaml
 
 Generate:
 
-    export MODEL=Baby-Math-v2-S-ep4
-    python generate.py --run $MODEL --prompt 'Compute: -56 + 13'
+    export MODEL=Baby-Math-S
+    python generate.py --run $MODEL --prompt 'Compute: 56 + 13'
 
 You view the loss curve by running:
 

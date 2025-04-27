@@ -1,4 +1,4 @@
-name: "Baby-Math-v3-S-ep4"
+name: "Baby-Math-S"
 overwrite: true
 data:
   input_file: "baby_math/train.jsonl"
